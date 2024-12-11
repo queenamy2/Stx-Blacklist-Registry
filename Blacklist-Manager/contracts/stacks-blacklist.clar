@@ -16,7 +16,7 @@
 (define-data-var backup-admin principal tx-sender)
 (define-data-var blacklisted-address-count uint u0)
 (define-data-var is-contract-active bool true)
-(define-data-var last-updated uint (default-to u0 block-height))
+(define-data-var last-updated uint block-height)
 
 ;; Maps
 (define-map blacklisted-addresses principal 
@@ -49,7 +49,7 @@
   (map-get? blacklisted-addresses address))
 
 (define-read-only (get-blacklist-reason-for-address (address principal))
-  (default-to "" (map-get? blacklisted-address-reasons address)))
+  (default-to u"" (map-get? blacklisted-address-reasons address)))
 
 (define-read-only (get-total-blacklisted-address-count)
   (var-get blacklisted-address-count))
@@ -138,7 +138,7 @@
     (asserts! (is-address-blacklisted tx-sender) ERR-NOT-BLACKLISTED)
     (map-set blacklist-appeals tx-sender
       {
-        status: "pending",
+        status: u"pending",
         appeal-timestamp: block-height,
         appeal-reason: reason
       })
@@ -147,14 +147,16 @@
 (define-public (process-appeal (address principal) (approved bool))
   (begin
     (asserts! (is-authorized) ERR-NOT-AUTHORIZED)
-    (match (map-get? blacklist-appeals address)
-      appeal (begin
-        (map-set blacklist-appeals address
-          (merge appeal { status: (if approved "approved" "rejected") }))
-        (if approved
-          (try! (remove-address-from-blacklist address))
-          (ok true)))
-      (err ERR-NOT-BLACKLISTED))))
+    (let ((appeal-data (map-get? blacklist-appeals address)))
+      (match appeal-data
+        appeal (begin 
+                (map-set blacklist-appeals address
+                  (merge appeal { status: (if approved u"approved" u"rejected") }))
+                (if approved 
+                  (remove-address-from-blacklist address)
+                  (ok true)))
+        ERR-NOT-BLACKLISTED)))) ;; Now returns a (response bool uint) directly
+
 
 (define-public (toggle-contract-status)
   (begin
@@ -168,10 +170,10 @@
     (asserts! (>= new-expiry block-height) ERR-INVALID-TIME)
     (match (map-get? blacklisted-addresses address)
       entry (begin
-        (map-set blacklisted-addresses address
-          (merge entry { expiry: (some new-expiry) }))
-        (ok true))
-      (err ERR-NOT-BLACKLISTED))))
+              (map-set blacklisted-addresses address
+                (merge entry { expiry: (some new-expiry) }))
+              (ok true))
+      ERR-NOT-BLACKLISTED)))
 
 ;; Prevent STX transfer to the contract
 (define-public (receive-stx)
