@@ -23,7 +23,7 @@
   {
     is-blacklisted: bool,
     timestamp: uint,
-    expiry: (optional uint),
+    expiry: uint,
     blacklist-level: uint
   })
 (define-map blacklisted-address-reasons principal (string-utf8 500))
@@ -40,9 +40,7 @@
   (match (map-get? blacklisted-addresses address)
     entry (and 
             (get is-blacklisted entry)
-            (match (get expiry entry)
-              expiry-time (< block-height expiry-time)
-              true))
+            (> (get expiry entry) block-height))
     false))
 
 (define-read-only (get-blacklist-details (address principal))
@@ -73,10 +71,14 @@
       (is-eq tx-sender (var-get backup-admin))
       (is-admin tx-sender)))
 
+(define-private (calculate-expiry (expiry-blocks (optional uint)))
+  (default-to (+ block-height u1000) expiry-blocks))
+
 ;; Public Functions
 (define-public (set-contract-admin (new-admin principal))
   (begin 
     (asserts! (is-eq tx-sender (var-get contract-admin)) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-eq new-admin (var-get contract-admin))) ERR-INVALID-ARGUMENT)
     (var-set contract-admin new-admin)
     (map-set admins new-admin true)
     (ok true)))
@@ -84,6 +86,7 @@
 (define-public (set-backup-admin (new-backup-admin principal))
   (begin 
     (asserts! (is-eq tx-sender (var-get contract-admin)) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-eq new-backup-admin (var-get backup-admin))) ERR-INVALID-ARGUMENT)
     (var-set backup-admin new-backup-admin)
     (map-set admins new-backup-admin true)
     (ok true)))
@@ -91,6 +94,7 @@
 (define-public (add-admin (address principal))
   (begin 
     (asserts! (is-authorized) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-admin address)) ERR-ALREADY-BLACKLISTED)
     (map-set admins address true)
     (ok true)))
 
@@ -111,17 +115,20 @@
     (asserts! (not (is-admin address)) ERR-CANNOT-BLACKLIST-ADMIN)
     (asserts! (not (is-address-blacklisted address)) ERR-ALREADY-BLACKLISTED)
     (asserts! (> (len reason) u0) ERR-INVALID-ARGUMENT)
-    (map-set blacklisted-addresses address 
-      {
-        is-blacklisted: true,
-        timestamp: block-height,
-        expiry: expiry-blocks,
-        blacklist-level: blacklist-level
-      })
-    (map-set blacklisted-address-reasons address reason)
-    (var-set blacklisted-address-count (+ (var-get blacklisted-address-count) u1))
-    (var-set last-updated block-height)
-    (ok true)))
+    (asserts! (and (>= blacklist-level u1) (<= blacklist-level u10)) ERR-INVALID-ARGUMENT)
+    (let ((safe-expiry (calculate-expiry expiry-blocks)))
+      (asserts! (> safe-expiry block-height) ERR-INVALID-TIME)
+      (map-set blacklisted-addresses address 
+        {
+          is-blacklisted: true,
+          timestamp: block-height,
+          expiry: safe-expiry,
+          blacklist-level: blacklist-level
+        })
+      (map-set blacklisted-address-reasons address reason)
+      (var-set blacklisted-address-count (+ (var-get blacklisted-address-count) u1))
+      (var-set last-updated block-height)
+      (ok true))))
 
 (define-public (remove-address-from-blacklist (address principal))
   (begin 
@@ -136,6 +143,7 @@
 (define-public (submit-appeal (reason (string-utf8 500)))
   (begin
     (asserts! (is-address-blacklisted tx-sender) ERR-NOT-BLACKLISTED)
+    (asserts! (> (len reason) u0) ERR-INVALID-ARGUMENT)
     (map-set blacklist-appeals tx-sender
       {
         status: u"pending",
@@ -147,16 +155,13 @@
 (define-public (process-appeal (address principal) (approved bool))
   (begin
     (asserts! (is-authorized) ERR-NOT-AUTHORIZED)
-    (let ((appeal-data (map-get? blacklist-appeals address)))
-      (match appeal-data
-        appeal (begin 
-                (map-set blacklist-appeals address
-                  (merge appeal { status: (if approved u"approved" u"rejected") }))
-                (if approved 
-                  (remove-address-from-blacklist address)
-                  (ok true)))
-        ERR-NOT-BLACKLISTED)))) ;; Now returns a (response bool uint) directly
-
+    (asserts! (is-address-blacklisted address) ERR-NOT-BLACKLISTED)
+    (let ((appeal-data (unwrap! (map-get? blacklist-appeals address) ERR-NOT-BLACKLISTED)))
+      (map-set blacklist-appeals address
+        (merge appeal-data { status: (if approved u"approved" u"rejected") }))
+      (if approved 
+        (remove-address-from-blacklist address)
+        (ok true)))))
 
 (define-public (toggle-contract-status)
   (begin
@@ -167,11 +172,12 @@
 (define-public (update-blacklist-expiry (address principal) (new-expiry uint))
   (begin
     (asserts! (is-authorized) ERR-NOT-AUTHORIZED)
-    (asserts! (>= new-expiry block-height) ERR-INVALID-TIME)
+    (asserts! (> new-expiry block-height) ERR-INVALID-TIME)
+    (asserts! (is-address-blacklisted address) ERR-NOT-BLACKLISTED)
     (match (map-get? blacklisted-addresses address)
       entry (begin
               (map-set blacklisted-addresses address
-                (merge entry { expiry: (some new-expiry) }))
+                (merge entry { expiry: new-expiry }))
               (ok true))
       ERR-NOT-BLACKLISTED)))
 
